@@ -23,7 +23,7 @@ import copy
 import util
 import os
 
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 torch.set_default_tensor_type(torch.DoubleTensor)
 class Client_side(nn.Module):
 
@@ -33,7 +33,7 @@ class Client_side(nn.Module):
 
         self.feature_scaler = feature_scaler
         self.batch_size = batch_size
-        self.base_model = client_model().to('cpu')
+        self.base_model = client_model().to('cuda')
         self.optimizer = optim.Adam(self.base_model.parameters(), lr=0.001, weight_decay=0.0001)
 
     def forward(self, x, stage):
@@ -150,14 +150,14 @@ def setup():
     for category in ['train', 'val', 'test']:
         data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
     # shuffle trainset in advance with a fixed seed (42)
-    data['train_loader'] = util.DataLoader(data['x_train'], data['y_train'], 64)
-    data['val_loader'] = util.DataLoader(data['x_val'], data['y_val'], 64)
-    data['test_loader'] = util.DataLoader(data['x_test'], data['y_test'], 64)
+    data['train_loader'] = util.DataLoader(data['x_train'], data['y_train'], 32)
+    data['val_loader'] = util.DataLoader(data['x_val'], data['y_val'], 32)
+    data['test_loader'] = util.DataLoader(data['x_test'], data['y_test'], 32)
     data['scaler'] = scaler
 
     clients = []
     for client_i in range(207):
-        client = Client_side(feature_scaler=scaler,batch_size=64)
+        client = Client_side(feature_scaler=scaler,batch_size=32)
         clients.append(client)
     clients = nn.ModuleList(clients)
     prop_model = graphmodel(num_nodes=207).to(device)
@@ -191,10 +191,12 @@ def setup():
         for iter, dataset in enumerate(data['train_loader'].get_iterator()):
             prop_model.train()
             (x, y) = dataset
-            trainx = torch.Tensor(x)
+            trainx = torch.Tensor(x).to(device)
             # print(trainx.shape) ([64, 12, 207, 2])
-            trainy = torch.Tensor(y)
-
+            trainy = torch.Tensor(y).to(device)
+            for client_i, client in enumerate(clients):
+                client.local_optimizer_zero_grad()
+            prop_model_optimizer.zero_grad()
             encodings = []  # list of L x (B x 1) x F
             for client_i, client in enumerate(clients):
                 encodings.append(client.local_encode_forward(trainx[:,:,client_i,:],trainy[:,:,client_i,:],'train'))
@@ -214,10 +216,8 @@ def setup():
             for client_i, client in enumerate(clients):
                 client.local_decode_forward(trainx[:,:,client_i,:],trainy[:,:,client_i,:],hiddens[:,:,client_i,:])
             # 4. run zero_grad for all optimizers
-            prop_model.zero_grad()
 
-            for client_i, client in enumerate(clients):
-                client.local_optimizer_zero_grad()
+
             hiddens_msg_grad=[]
             # 4. run backward on all clients
             for client_i, client in enumerate(clients):
@@ -225,18 +225,18 @@ def setup():
                 train_loss[str(client_i)].append(local_train_result['train_loss'])
                 train_mape[str(client_i)].append(local_train_result['train_mape'])
                 train_rmse[str(client_i)].append(local_train_result['train_rmse'])
-                hiddens_msg_grad.append(local_train_result['grad'])
-            hiddens_msg_grad = torch.stack(hiddens_msg_grad, dim=1)
+                # hiddens_msg_grad.append(local_train_result['grad'])
+            # hiddens_msg_grad = torch.stack(hiddens_msg_grad, dim=1)
             # 4.1 run backward on server graph model
-            hiddens.backward(hiddens_msg_grad.transpose(1,2))
+            # hiddens.backward(hiddens_msg_grad.transpose(1,2))
             # 4.2 collect grads on data and run backward on clients
-            for client_i, client in enumerate(clients):
-                if stacked_encodings.grad is not None:
-                    data_grads= stacked_encodings.grad[:,client_i,:,:].unsqueeze(2)
-                    data_grads = data_grads.permute(0, 3, 2, 1)
-                else:
-                    data_grads = None
-                client.local_backward(trainy[:,:,client_i,:], grads=data_grads, stage='enc')
+            # for client_i, client in enumerate(clients):
+            #     if stacked_encodings.grad is not None:
+            #         data_grads= stacked_encodings.grad[:,client_i,:,:].unsqueeze(2)
+            #         data_grads = data_grads.permute(0, 3, 2, 1)
+            #     else:
+            #         data_grads = None
+                # client.local_backward(trainy[:,:,client_i,:], grads=data_grads, stage='enc')
             # 5. run optimizers on the server and all clients
             prop_model_optimizer.step()
             for client_i, client in enumerate(clients):
@@ -244,15 +244,15 @@ def setup():
             # agg_log = aggregate_local_logs(local_train_logs)
             if iter % 50 == 0:
                 log = ' Iter: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}'
-                print(id, log.format(iter, train_loss['0'].item(), train_mape['0'], train_rmse['0']), flush=True)
+                print(id, log.format(iter, train_loss['0'][iter], train_mape['0'][iter], train_rmse['0'][iter]), flush=True)
         t2 = time.time()
 
         train_time.append(t2 - t1)
 
         s1 = time.time()
-        for iter, data in enumerate(data['val_loader'].get_iterator()):
+        for iter, dataset in enumerate(data['val_loader'].get_iterator()):
             prop_model.eval()
-            (x, y) = data
+            (x, y) = dataset
             val_x = torch.Tensor(x).to(device)
             val_y = torch.Tensor(y).to(device)
             encodings = []  # list of L x (B x 1) x F
@@ -291,11 +291,11 @@ def setup():
         print(id, log.format(epoch, mmtrain_loss, mmtrain_mape, mmtrain_rmse, mmvalid_loss, mmvalid_mape, mmvalid_rmse,(t2 - t1)),flush=True)
         # torch.save(self.modelA1.state_dict(),args.saveA1 + "_epoch_" + str(epoch) + "_" + str(round(mvalid_loss, 4)) + ".pth")
 
-        # if epoch%5==0:
-        agg_state_dict = aggregate_local_train_state_dicts([client.state_dict() for client in clients])
-        print(agg_state_dict)
-        for client_i, client in enumerate(clients):
-            client.load_state_dict(deepcopy(agg_state_dict))
+        if epoch%5==0:
+            agg_state_dict = aggregate_local_train_state_dicts([client.state_dict() for client in clients])
+
+            for client_i, client in enumerate(clients):
+                client.load_state_dict(deepcopy(agg_state_dict))
 
 setup()
 
