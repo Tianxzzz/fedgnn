@@ -8,17 +8,17 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.utils import dense_to_sparse
 
-import models
+
 import util
 from torch.utils.data import TensorDataset, Dataset, DataLoader
 import torch.nn as nn
-from models import TCN,client_model,graphmodel
+from base_model.models import client_model,graphmodel
+from base_model.GraphNets import GraphNet
 import torch.optim as optim
 from standalone import unscaled_metrics
 import time
 import torch.nn.functional as F
 from copy import deepcopy
-from model import STGCN
 import copy
 import util
 import os
@@ -139,7 +139,8 @@ def aggregate_local_logs(local_logs):
 def setup():
 
     device = torch.device('cuda')
-    sensor_ids, sensor_id_to_ind, adj_mx = util.load_adj('data/sensor_graph/adj_mx.pkl', 'scalap')
+    batch_size=48#METR:48/56,PEMS-BAY:24
+    # sensor_ids, sensor_id_to_ind, adj_mx = util.load_adj('data/sensor_graph/adj_mx.pkl', 'scalap')
     data = {}
     for category in ['train', 'val', 'test']:
         cat_data = np.load(os.path.join('data/METR-LA', category + '.npz'))
@@ -149,21 +150,28 @@ def setup():
         # Data format
     for category in ['train', 'val', 'test']:
         data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
-    # shuffle trainset in advance with a fixed seed (42)
-    data['train_loader'] = util.DataLoader(data['x_train'], data['y_train'], 32)
-    data['val_loader'] = util.DataLoader(data['x_val'], data['y_val'], 32)
-    data['test_loader'] = util.DataLoader(data['x_test'], data['y_test'], 32)
+    # shuffle trainset in advancse with a fixed seed (42)
+    data['train_loader'] = util.DataLoader(data['x_train'], data['y_train'], batch_size=batch_size)
+    data['val_loader'] = util.DataLoader(data['x_val'], data['y_val'], batch_size=batch_size)
+    data['test_loader'] = util.DataLoader(data['x_test'], data['y_test'], batch_size=batch_size)
     data['scaler'] = scaler
-
+    num_clients = 207
     clients = []
-    for client_i in range(207):
-        client = Client_side(feature_scaler=scaler,batch_size=32)
+    for client_i in range(num_clients):
+        client = Client_side(feature_scaler=scaler,batch_size=batch_size)
         clients.append(client)
     clients = nn.ModuleList(clients)
-    prop_model = graphmodel(num_nodes=207).to(device)
+    prop_model = GraphNet(node_input_size=32,
+            edge_input_size=1,
+            global_input_size=32,
+            hidden_size=256,
+            updated_node_size=128,
+            updated_edge_size=128,
+            updated_global_size=128,
+            node_output_size=32,
+            gn_layer_num=2,
+            activation='ReLU', dropout=0.5).to(device)
     prop_model_optimizer = torch.optim.Adam(prop_model.parameters(), lr=0.001, weight_decay=0.0001)
-
-    num_clients=207
 
     val_time = []
     train_time = []
@@ -210,14 +218,12 @@ def setup():
             stacked_encodings.retain_grad()
 
             # 2. run propagation with the known graph structure and collected embeddings
-            hiddens = prop_model(stacked_encodings) #([64, 207, 2, 64])
+            hiddens = prop_model(stacked_encodings)
 
             # 3. run decoding on all clients
             for client_i, client in enumerate(clients):
-                client.local_decode_forward(trainx[:,:,client_i,:],trainy[:,:,client_i,:],hiddens[:,:,client_i,:])
+                client.local_decode_forward(trainx[:,:,client_i,:],trainy[:,:,client_i,:],hiddens[:,client_i,:])
             # 4. run zero_grad for all optimizers
-
-
             hiddens_msg_grad=[]
             # 4. run backward on all clients
             for client_i, client in enumerate(clients):
@@ -241,7 +247,11 @@ def setup():
             prop_model_optimizer.step()
             for client_i, client in enumerate(clients):
                 client.local_optimizer_step()
+                # if client_i==0:
+                #     print(client.state_dict())
             # agg_log = aggregate_local_logs(local_train_logs)
+            # for client_i, client in enumerate(clients):
+
             if iter % 50 == 0:
                 log = ' Iter: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}'
                 print(id, log.format(iter, train_loss['0'][iter], train_mape['0'][iter], train_rmse['0'][iter]), flush=True)
@@ -250,6 +260,7 @@ def setup():
         train_time.append(t2 - t1)
 
         s1 = time.time()
+
         for iter, dataset in enumerate(data['val_loader'].get_iterator()):
             prop_model.eval()
             (x, y) = dataset
@@ -262,7 +273,7 @@ def setup():
             stacked_encodings = stacked_encodings.permute(0, 2, 3, 1)
             hiddens = prop_model(stacked_encodings)
             for client_i, client in enumerate(clients):
-                client.local_decode_forward(val_x[:, :, client_i, :], val_y[:, :, client_i, :], hiddens[:, :, client_i, :])
+                client.local_decode_forward(val_x[:, :, client_i, :], val_y[:, :, client_i, :], hiddens[:,client_i, :])
                 # 4. run eval on all clients
 
             for client_i, client in enumerate(clients):
@@ -273,7 +284,7 @@ def setup():
         s2 = time.time()
         val_time.append(s2 - s1)
         # train_time.append(t2 - t1)
-        for name in range(207):
+        for name in range(num_clients):
             mtrain_loss.append(np.mean(train_loss[str(name)]))
             mtrain_mape.append(np.mean(train_mape[str(name)]))
             mtrain_rmse.append(np.mean(train_rmse[str(name)]))
@@ -289,9 +300,11 @@ def setup():
         # his_loss.append(mvalid_loss)
         log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
         print(id, log.format(epoch, mmtrain_loss, mmtrain_mape, mmtrain_rmse, mmvalid_loss, mmvalid_mape, mmvalid_rmse,(t2 - t1)),flush=True)
-        # torch.save(self.modelA1.state_dict(),args.saveA1 + "_epoch_" + str(epoch) + "_" + str(round(mvalid_loss, 4)) + ".pth")
+        torch.save(prop_model.state_dict(), "params_avg_zhishu/"+"server_model_epoch_" + str(epoch) + "_" + str(round(mmvalid_loss, 4)) + ".pth")
+        for client_i, client in enumerate(clients):
+            torch.save(client.state_dict(), "params_avg_zhishu/"+"client_"+str(client_i)+"_epoch_"+ str(epoch) + "_" + str(round(mmvalid_loss, 4)) + ".pth")
 
-        if epoch%5==0:
+        if (epoch+1)==10 or (epoch+1)==30 or (epoch+1)==70:
             agg_state_dict = aggregate_local_train_state_dicts([client.state_dict() for client in clients])
 
             for client_i, client in enumerate(clients):

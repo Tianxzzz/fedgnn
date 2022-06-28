@@ -11,25 +11,43 @@ from torch_geometric.data import DataLoader, Data
 from torch_geometric.utils import to_dense_adj
 from torch.utils.data import TensorDataset
 
+from st_datasets import load_dataset
 
+import  numpy as np
 
-def unscaled_metrics(y_pred, y, scaler, name):
+def unscaled_metrics(y_pred, y, scaler, null_val=np.nan):
     y = scaler.inverse_transform(y.detach().cpu())
+    # y=y.detach().cpu()
     y_pred = scaler.inverse_transform(y_pred.detach().cpu())
     # mse
+    if np.isnan(null_val):
+        mask = ~torch.isnan(y)
+    else:
+        mask = (y != null_val)
+    mask = mask.float()
+    mask /= torch.mean((mask))
+    mask = torch.where(torch.isnan(mask), torch.zeros_like(mask), mask)
+    mape = torch.abs(y_pred - y) / torch.clip(torch.abs(y),1,None)
+    mape = mape * mask
+    mape = torch.mean(torch.where(torch.isnan(mape), torch.zeros_like(mape), mape))
+
     mse = ((y_pred - y) ** 2).mean()
     # RMSE
     # rmse = torch.sqrt(mse)
     # MAE
     mae = torch.abs(y_pred - y).mean()
     # MAPE
-    mape = torch.abs((y_pred - y) / y).mean()
+    rmse=torch.sqrt(mse)
+
     return {
-        '{}/mse'.format(name): mse.detach(),
-        # '{}/rmse'.format(name): rmse.detach(),
-        '{}/mae'.format(name): mae.detach(),
-        '{}/mape'.format(name): mape.detach()
+        'mse': mse.detach(), 'rmse': rmse.detach(), 'mae': mae.detach(),  'mape': mape.detach()
     }
+    # return {
+    #     '{}/mse'.format(name): mse.detach(),
+    #     # '{}/rmse'.format(name): rmse.detach(),
+    #     '{}/mae'.format(name): mae.detach(),
+    #     '{}/mape'.format(name): mape.detach()
+    # }
 
 
 class NodePredictor(LightningModule):
