@@ -1,5 +1,4 @@
 import random
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,7 +9,42 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv,GATv2Conv
 
-torch.set_default_tensor_type(torch.DoubleTensor)
+class GATMetaLayer(torch.nn.Module):
+
+    def __init__(self,  node_model=None, global_model=None):
+        super().__init__()
+
+        self.node_model = node_model
+        self.global_model = global_model
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for item in [self.node_model, self.global_model]:
+            if hasattr(item, 'reset_parameters'):
+                item.reset_parameters()
+
+    def forward(self, x, edge_index, u,batch):
+        """"""
+        row = edge_index[0]
+        col = edge_index[1]
+
+
+        if self.node_model is not None:
+            x = self.node_model(x, edge_index, u, batch)
+
+        if self.global_model is not None:
+            u = self.global_model(x, edge_index, u, batch)
+
+        return x, u
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(\n'
+               
+                f'  node_model={self.node_model},\n'
+                f'  global_model={self.global_model}\n'
+                f')')
+
 # class TCN(nn.Module):
 #     def __init__(self):
 #         super().__init__()

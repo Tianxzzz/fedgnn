@@ -21,7 +21,7 @@ import util
 from st_datasets import load_dataset
 import base_model
 from standalone import unscaled_metrics
-from base_model.GraphNets import GraphNet
+from base_model.GraphNets import GraphNet,GATGraphNet
 from base_model.GRUSeq2Seq import GRUSeq2Seq,GRUSeq2SeqWithGraphNet
 from torch_geometric.utils import dense_to_sparse
 def load_pickle(pickle_file):
@@ -184,9 +184,9 @@ def setup():
     input_size = dataset['train']['x'].shape[-1] + dataset['train']['x_attr'].shape[-1]
     output_size = dataset['train']['y'].shape[-1]
     # print(data['train']['x'].shape)  torch.Size([23974, 12, 207, 1])
-    adj_mx_path = os.path.join('data/', 'sensor_graph', 'adj_mx.pkl')
-    _, _, adj_mx = load_pickle(adj_mx_path)
-    adj_mx_ts = torch.from_numpy(adj_mx).float()
+    # adj_mx_path = os.path.join('data/', 'sensor_graph', 'adj_mx.pkl')
+    # _, _, adj_mx = load_pickle(adj_mx_path)
+    # adj_mx_ts = torch.from_numpy(adj_mx).float()
     client_params_list = []
     for client_i in range(num_clients):
         client_datasets = {}
@@ -211,13 +211,13 @@ def setup():
         client_params_list.append(client_params)
 
     client_model = GRUSeq2SeqWithGraphNet()
-    server_model = GraphNet(
+    server_model = GATGraphNet(
         node_input_size=64,
         edge_input_size=1,
         global_input_size=64,
         hidden_size=256,
         updated_node_size=128,
-        updated_edge_size=128,
+
         updated_global_size=128,
         node_output_size=64,
         gn_layer_num=2,
@@ -232,19 +232,20 @@ def setup():
    )
         # 1. train locally and collect uploaded local train results
 
-    for m in range(50):
+    for m in range(100):
         t1=time.time()
         local_train_results = []
-        index = random.sample(range(0, 207), 20)
+        adp = np.ones((207, 207))
+        adp= torch.from_numpy(adp).float()
+        index = random.sample(range(0, 207), 103)
         for i in index:
-            adj_mx_ts[[i], :] = 0
-            adj_mx_ts[:, [i]] = 0
-        train_edge_index, train_edge_attr = dense_to_sparse(adj_mx_ts)
+            adp[[i], :] = 0
+            adp[:, [i]] = 0
+        train_edge_index, train_edge_attr = dense_to_sparse(adp)
         for client_i, client_params in enumerate(client_params_list):
 
             local_train_result = SplitFedNodePredictorClient.client_local_execute(deepcopy(client_model.state_dict()),'train', **client_params)
             local_train_results.append(local_train_result)
-
         # update global steps for all clients
         for ltr, client_params in zip(local_train_results, client_params_list):
             client_params.update(start_global_step=ltr[0]['log']['global_step'])
@@ -288,10 +289,13 @@ def setup():
                     h_encode = client_model.forward_encoder(input)  # L x (B x N) x F
                     batch_num, node_num = input['x'].shape[0], input['x'].shape[2]
                     graph_encoding = h_encode.view(h_encode.shape[0], batch_num, node_num, h_encode.shape[2]).permute(2, 1, 0,3)  # N x B x L x F
+
                     graph_encoding = server_model(
-                        Data(x=graph_encoding,edge_index=train_edge_index.to('cuda'),
-                             edge_attr=train_edge_attr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to('cuda'))
-                    )  # N x B x L x F
+                        Data(x=graph_encoding, edge_index=train_edge_index.to('cuda')))
+                    # graph_encoding = server_model(
+                    #     Data(x=graph_encoding, edge_index=train_edge_index.to('cuda'),
+                    #          edge_attr=train_edge_attr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to('cuda')))
+                      # N x B x L x F
                     if epoch_i == 1:
                         updated_graph_encoding.append(graph_encoding.detach().clone().cpu())
                     else:
@@ -338,16 +342,17 @@ def setup():
 
         log = 'global epoch: {:03d}, MSE: {:.4f}, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}, Training Time: {:.4f}/global epoch'
         print(id, log.format(m, np.mean(mse),np.mean(rmse), np.mean(mae),np.mean(mape),(t2 - t1), flush=True))
-        # torch.save(server_model.state_dict(), "dropnode/" + "server_epoch_" + str(m) + "_" + str(round(np.mean(mae), 4)) + ".pth")
-        # torch.save(client_model.state_dict(),
-        #            "dropnode/" + "client_epoch_" + str(m) + "_" + str(round(np.mean(mae), 4)) + ".pth")
+
         local_val_results = []
         server_val_dataloader = DataLoader(server_datasets['val'], batch_size=48, shuffle=True)
         updated_graph_encoding = []
         client_model.eval()
         server_model.eval()
         with torch.no_grad():
+            adp = np.ones((207, 207))
+            adp = torch.from_numpy(adp).float()
 
+            val_edge_index, val_edge_attr = dense_to_sparse(adp)
             for batch in server_val_dataloader:
                 x, y, x_attr, y_attr = batch
                 x = x.to(device) if (x is not None) else None
@@ -362,9 +367,7 @@ def setup():
                 graph_encoding = h_encode.view(h_encode.shape[0], batch_num, node_num, h_encode.shape[2]).permute(2, 1, 0,3)  # N x B x L x F
                 # print(graph_encoding.shape)torch.Size([207, 48, 1, 64])
                 graph_encoding = server_model(
-                    Data(x=graph_encoding, edge_index=data['test']['edge_index'].to('cuda'),
-                         edge_attr=data['test']['edge_attr'].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to('cuda'))
-                )  # N x B x L x F
+                    Data(x=graph_encoding, edge_index=val_edge_index.to('cuda')))
                 # print(graph_encoding.shape)torch.Size([207, 48, 1, 64])
                 updated_graph_encoding.append(graph_encoding.detach().clone().cpu())
         updated_graph_encoding = torch.cat(updated_graph_encoding, dim=1)  # N x B x L x F
@@ -385,9 +388,11 @@ def setup():
             local_val_results.append(local_val_result)
 
         client_log = aggregate_local_logs([x[0]['log'] for x in local_val_results])
-        EarlyStopping(client_log['val/loss'],client_model,server_model)
+
 
         print(client_log)
+        torch.save(server_model.state_dict(), "GATGN/drop0.5/" + "server_epoch_" + str(m) + "_" + str(client_log['mae']) + ".pth")
+        torch.save(client_model.state_dict(), "GATGN/drop0.5/" + "client_epoch_" + str(m) + "_" + str(client_log['mae']) + ".pth")
 
     # return {'loss': torch.tensor(0).float(), 'progress_bar': log, 'log': log}
 

@@ -1,7 +1,7 @@
 import os
 import pickle
 from functools import partial
-
+import standalone
 import numpy as np
 import pandas as pd
 import torch
@@ -47,9 +47,11 @@ def load_pems_data(rootpath, name, adj_mx_name, ratio=1.0, one_node=False, one_s
     adj_mx_path = os.path.join(rootpath, 'sensor_graph', adj_mx_name)
     _, _, adj_mx = load_pickle(adj_mx_path)
     adj_mx_ts = torch.from_numpy(adj_mx).float()
+
     if inductive:
         train_adj_mx_ts = adj_mx_ts[selected_nodes, :][:, selected_nodes]
         eval_adj_mx_ts = adj_mx_ts
+
     else:
         train_adj_mx_ts, eval_adj_mx_ts = adj_mx_ts, adj_mx_ts
     train_edge_index, train_edge_attr = dense_to_sparse(train_adj_mx_ts)
@@ -84,10 +86,12 @@ def load_pems_data(rootpath, name, adj_mx_name, ratio=1.0, one_node=False, one_s
     }
 
     for name in ['train', 'val', 'test']:
-        x = feature_scaler.transform(raw_data[name]['x'][..., FEATURE_START:FEATURE_END])
-        y = feature_scaler.transform(raw_data[name]['y'][..., FEATURE_START:FEATURE_END])
-        x_attr = attr_scaler.transform(raw_data[name]['x'][..., ATTR_START:ATTR_END])
-        y_attr = attr_scaler.transform(raw_data[name]['y'][..., ATTR_START:ATTR_END])
+
+        xs,ys=standalone.pad_with_last_sample(raw_data[name]['x'],raw_data[name]['y'],48)
+        x = feature_scaler.transform(xs[..., FEATURE_START:FEATURE_END])
+        y = feature_scaler.transform(ys[..., FEATURE_START:FEATURE_END])
+        x_attr = attr_scaler.transform(xs[..., ATTR_START:ATTR_END])
+        y_attr = attr_scaler.transform(ys[..., ATTR_START:ATTR_END])
 
         # for debugging
         if one_node:
@@ -248,9 +252,9 @@ available_datasets = {
         name='METR-LA', adj_mx_name='adj_mx.pkl', one_node=True, one_sample=False),
     'METR-LA-onesample': partial(load_pems_data, rootpath='data/traffic/data',
         name='METR-LA', adj_mx_name='adj_mx.pkl', one_node=False, one_sample=True),
-    'METR-LA-0.25': partial(load_pems_data, rootpath='data/traffic/data',
+    'METR-LA-0.25': partial(load_pems_data, rootpath='data',
         name='METR-LA', adj_mx_name='adj_mx.pkl', ratio=0.25),
-    'METR-LA-0.5': partial(load_pems_data, rootpath='data/traffic/data',
+    'METR-LA-0.5': partial(load_pems_data, rootpath='data',
         name='METR-LA', adj_mx_name='adj_mx.pkl', ratio=0.5),
     'METR-LA-0.75': partial(load_pems_data, rootpath='data/traffic/data',
         name='METR-LA', adj_mx_name='adj_mx.pkl', ratio=0.75),

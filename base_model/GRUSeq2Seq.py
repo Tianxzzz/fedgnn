@@ -231,7 +231,7 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
         _, h_encode = self.encoder(x_input)
         return h_encode # L x (B x N) x F
 
-    def forward_decoder(self, data, h_encode, batches_seen, return_encoding=False, server_graph_encoding=None):
+    def forward_decoder(self, data, h_encode, return_encoding=False, server_graph_encoding=None):
         x, x_attr, y, y_attr, batch_num, node_num = self._format_input_data(data)
         x_input = torch.cat((x, x_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
         encoder_h = h_encode
@@ -285,7 +285,7 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
 
     def forward(self, data, batches_seen, return_encoding=False, server_graph_encoding=None):
         h_encode = self.forward_encoder(data)
-        return self.forward_decoder(data, h_encode, batches_seen, return_encoding, server_graph_encoding)
+        return self.forward_decoder(data, h_encode, return_encoding, server_graph_encoding)
 
     # @staticmethod
     # def add_model_specific_args(parent_parser):
