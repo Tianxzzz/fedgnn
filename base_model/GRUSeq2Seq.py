@@ -20,8 +20,8 @@ class GRUSeq2Seq(nn.Module):
         dropout = 0
         gru_num_layers = 1
         self.gcn_on_server = 1
-        # self.cl_decay_steps = cl_decay_steps
-        # self.use_curriculum_learning = use_curriculum_learning
+        self.cl_decay_steps = 1000
+        self.use_curriculum_learning = True
         self.encoder = nn.GRU(
             input_size, hidden_size, num_layers=gru_num_layers, dropout=dropout
         )
@@ -37,12 +37,12 @@ class GRUSeq2Seq(nn.Module):
             )
             self.out_net = nn.Linear(hidden_size, output_size)
 
-    # def _compute_sampling_threshold(self, batches_seen):
-    #     if self.cl_decay_steps == 0:
-    #         return 0
-    #     else:
-    #         return self.cl_decay_steps / (
-    #                 self.cl_decay_steps + np.exp(batches_seen / self.cl_decay_steps))
+    def _compute_sampling_threshold(self, batches_seen):
+        if self.cl_decay_steps == 0:
+            return 0
+        else:
+            return self.cl_decay_steps / (
+                    self.cl_decay_steps + np.exp(batches_seen / self.cl_decay_steps))
 
     def forward(self, data, batches_seen, return_encoding=False, graph_encoding=None):
         # B x T x N x F
@@ -58,36 +58,37 @@ class GRUSeq2Seq(nn.Module):
         encoder_h = h_encode # (B x N) x L x F
         if self.with_graph_encoding:
             h_encode = torch.cat([h_encode, graph_encoding], dim=-1)
-        # if self.training and (not self.use_curriculum_learning):
-        y_input = torch.cat((y, y_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
-        y_input = torch.cat((x_input[-1:], y_input[:-1]), dim=0)
-        out_hidden, _ = self.decoder(y_input, h_encode)
-        out = self.out_net(out_hidden)
-        out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
-        # else:
-        #     last_input = x_input[-1:]
-        #     last_hidden = h_encode
-        #     step_num = y_attr.shape[1]
-        #     out_steps = []
-        #     y_input = y.permute(1, 0, 2, 3).flatten(1, 2)
-        #     y_attr_input = y_attr.permute(1, 0, 2, 3).flatten(1, 2)
-        #     for t in range(step_num):
-        #         out_hidden, last_hidden = self.decoder(last_input, last_hidden)
-        #         out = self.out_net(out_hidden) # T x (B x N) x F
-        #         out_steps.append(out)
-        #         last_input_from_output = torch.cat((out, y_attr_input[t:t+1]), dim=-1)
-        #         last_input_from_gt = torch.cat((y_input[t:t+1], y_attr_input[t:t+1]), dim=-1)
-        #         if self.training:
-        #             p_gt = self._compute_sampling_threshold(batches_seen)
-        #             p = torch.rand(1).item()
-        #             if p <= p_gt:
-        #                 last_input = last_input_from_gt
-        #             else:
-        #                 last_input = last_input_from_output
-        #         else:
-        #             last_input = last_input_from_output
-        #     out = torch.cat(out_steps, dim=0)
-        #     out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
+        if self.training and (not self.use_curriculum_learning):
+            y_input = torch.cat((y, y_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
+            y_input = torch.cat((x_input[-1:], y_input[:-1]), dim=0)
+            out_hidden, _ = self.decoder(y_input, h_encode)
+            out = self.out_net(out_hidden)
+            out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
+            print('1')
+        else:
+            last_input = x_input[-1:]
+            last_hidden = h_encode
+            step_num = y_attr.shape[1]
+            out_steps = []
+            y_input = y.permute(1, 0, 2, 3).flatten(1, 2)
+            y_attr_input = y_attr.permute(1, 0, 2, 3).flatten(1, 2)
+            for t in range(step_num):
+                out_hidden, last_hidden = self.decoder(last_input, last_hidden)
+                out = self.out_net(out_hidden) # T x (B x N) x F
+                out_steps.append(out)
+                last_input_from_output = torch.cat((out, y_attr_input[t:t+1]), dim=-1)
+                last_input_from_gt = torch.cat((y_input[t:t+1], y_attr_input[t:t+1]), dim=-1)
+                if self.training:
+                    p_gt = self._compute_sampling_threshold(batches_seen)
+                    p = torch.rand(1).item()
+                    if p <= p_gt:
+                        last_input = last_input_from_gt
+                    else:
+                        last_input = last_input_from_output
+                else:
+                    last_input = last_input_from_output
+            out = torch.cat(out_steps, dim=0)
+            out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
         if type(data) is Batch:
             out = out.squeeze(0).permute(1, 0, 2) # N x T x F
         if return_encoding:
@@ -188,14 +189,14 @@ class GRUSeq2SeqWithWeightedGCN(GRUSeq2Seq):
 class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
     def __init__(self):
         super().__init__()
-        input_size = 2
+        input_size = 1
         hidden_size = 64
         output_size = 1
         dropout = 0
         gru_num_layers = 1
         self.gcn_on_server = True
         self.decoder = nn.GRU(
-            input_size, 2 * hidden_size, num_layers=gru_num_layers, dropout=dropout
+            input_size, 2*hidden_size, num_layers=gru_num_layers, dropout=dropout
         )
 
         if self.gcn_on_server:
@@ -213,7 +214,8 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
                 gn_layer_num=2,
                 activation='ReLU', dropout=dropout
             )
-        self.out_net = nn.Linear(hidden_size * 2, output_size)
+        self.out_net = nn.Linear(2*hidden_size , 1)
+
 
     def _format_input_data(self, data):
         x, x_attr, y, y_attr = data['x'], data['x_attr'], data['y'], data['y_attr']
@@ -229,9 +231,11 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
         x, x_attr, y, y_attr, batch_num, node_num = self._format_input_data(data)
         x_input = torch.cat((x, x_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2) # T x (B x N) x F
         _, h_encode = self.encoder(x_input)
+        # h_encode, _= self.encoder(x_input)
+        # print(x_input.shape,_.shape,h_encode.shape)torch.Size([12, 128, 2]) torch.Size([12, 128, 64]) torch.Size([1, 128, 64])
         return h_encode # L x (B x N) x F
 
-    def forward_decoder(self, data, h_encode, return_encoding=False, server_graph_encoding=None):
+    def forward_decoder(self, data, h_encode,batches_seen, return_encoding=False, server_graph_encoding=None):
         x, x_attr, y, y_attr, batch_num, node_num = self._format_input_data(data)
         x_input = torch.cat((x, x_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
         encoder_h = h_encode
@@ -244,38 +248,53 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
                 Data(x=graph_encoding, edge_index=data['edge_index'], edge_attr=data['edge_attr'].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1))
             ) # N x B x L x F
         graph_encoding = graph_encoding.permute(2, 1, 0, 3).flatten(1, 2) # L x (B x N) x F
+        # print(graph_encoding.shape)torch.Size([1, 128, 64])
+        # print(graph_encoding.shape,h_encode.shape)
         h_encode = torch.cat([h_encode, graph_encoding], dim=-1)
+        # print(h_encode.shape)([1, 128, 128])
+        # print(x_input.shape) torch.Size([12, 128, 2])
 
         # if self.training and (not self.use_curriculum_learning):
-        y_input = torch.cat((y, y_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
-        y_input = torch.cat((x_input[-1:], y_input[:-1]), dim=0)
-        out_hidden, _ = self.decoder(y_input, h_encode)
-        out = self.out_net(out_hidden)
-        out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
+        # y_input = torch.cat((y, y_attr), dim=-1).permute(1, 0, 2, 3).flatten(1, 2)
+        # y_input = torch.cat((x_input[-1:], y_input[:-1]), dim=0)
+        # out_hidden, _ = self.decoder(x_input,h_encode)
+        # out = self.out_net(out_hidden)
+        # # # print(out.shape)[1,128,12]
+        # # out=out.permute(2,1,0)
+        # out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
         # else:
-        #     last_input = x_input[-1:]
-        #     last_hidden = h_encode
-        #     step_num = y_attr.shape[1]
-        #     out_steps = []
-        #     y_input = y.permute(1, 0, 2, 3).flatten(1, 2)
-        #     y_attr_input = y_attr.permute(1, 0, 2, 3).flatten(1, 2)
-        #     for t in range(step_num):
-        #         out_hidden, last_hidden = self.decoder(last_input, last_hidden)
-        #         out = self.out_net(out_hidden) # T x (B x N) x F
-        #         out_steps.append(out)
-        #         last_input_from_output = torch.cat((out, y_attr_input[t:t+1]), dim=-1)
-        #         last_input_from_gt = torch.cat((y_input[t:t+1], y_attr_input[t:t+1]), dim=-1)
-        #         if self.training:
-        #             p_gt = self._compute_sampling_threshold(batches_seen)
-        #             p = torch.rand(1).item()
-        #             if p <= p_gt:
-        #                 last_input = last_input_from_gt
-        #             else:
-        #                 last_input = last_input_from_output
-        #         else:
-        #             last_input = last_input_from_output
-        #     out = torch.cat(out_steps, dim=0)
-        #     out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
+        last_input = x_input[-1:][:,:,0].unsqueeze(-1)
+        # print(x_input.shape,last_input.shape)
+        last_hidden = h_encode
+        step_num = y_attr.shape[1]
+        out_steps = []
+        # print(last_hidden.shape)[1, 128, 128])
+        y_input = y.permute(1, 0, 2, 3).flatten(1, 2)
+        y_attr_input = y_attr.permute(1, 0, 2, 3).flatten(1, 2)
+        # print(y_input.shape)[12, 128, 1]
+        # print(y_attr_input.shape)[12, 128, 1]
+        for t in range(step_num):
+            out_hidden, last_hidden = self.decoder(last_input, last_hidden)
+            # print(out_hidden.shape)torch.Size([1, 128, 128])
+            out = self.out_net(out_hidden) # T x (B x N) x F
+            out_steps.append(out)
+            # last_input_from_output = torch.cat((out, y_attr_input[t:t+1]), dim=-1)
+            last_input_from_output = out
+            # last_input_from_gt = torch.cat((y_input[t:t+1], y_attr_input[t:t+1]), dim=-1)
+            last_input_from_gt = y_input[t:t + 1]
+
+            if self.training:
+                p_gt = self._compute_sampling_threshold(batches_seen)
+                p = torch.rand(1).item()
+                if p <= p_gt:
+                    last_input = last_input_from_gt
+                else:
+                    last_input = last_input_from_output
+            else:
+                last_input = last_input_from_output
+        out = torch.cat(out_steps, dim=0)
+        # out=self.out_net(out)
+        out = out.view(out.shape[0], batch_num, node_num, out.shape[-1]).permute(1, 0, 2, 3)
         if type(data) is Batch:
             out = out.squeeze(0).permute(1, 0, 2) # N x T x F
         if return_encoding:
@@ -285,7 +304,7 @@ class GRUSeq2SeqWithGraphNet(GRUSeq2Seq):
 
     def forward(self, data, batches_seen, return_encoding=False, server_graph_encoding=None):
         h_encode = self.forward_encoder(data)
-        return self.forward_decoder(data, h_encode, return_encoding, server_graph_encoding)
+        return self.forward_decoder(data, h_encode, batches_seen,return_encoding, server_graph_encoding)
 
     # @staticmethod
     # def add_model_specific_args(parent_parser):

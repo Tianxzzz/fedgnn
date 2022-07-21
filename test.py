@@ -80,7 +80,7 @@ class SplitFedNodePredictorClient(nn.Module):
                 y_pred= self(data, server_graph_encoding)
                 output.append(y_pred)
 
-                loss = util.masked_mae(y_pred,y,0.0)
+                loss = nn.MSELoss()(y_pred,y)
                 num_samples += x.shape[0]
                 metrics = unscaled_metrics(y_pred, y, self.feature_scaler, 0.0)
                 epoch_log['{}/loss'.format(name)] += loss.detach() * x.shape[0]
@@ -174,18 +174,26 @@ def setup():
             data[name]['x_attr'], data[name]['y_attr']
         )
     local_val_results = []
-    client_state_dict=torch.load(r'50/client_epoch_2_2.6881.pth')
-    server_state_dict= torch.load(r'50/server_epoch_2_2.6881.pth')
+    client_state_dict=torch.load(r'CNFGNN/METR-LA/client_epoch_25_tensor(8.7684, dtype=torch.float64).pth')
+    server_state_dict= torch.load(r'CNFGNN/METR-LA/server_epoch_25_tensor(8.7684, dtype=torch.float64).pth')
     client_model.to(device)
     server_model.to(device)
+    client_model.load_state_dict(client_state_dict)
     server_model.load_state_dict(server_state_dict)
-    server_test_dataloader = DataLoader(server_datasets['test'], batch_size=48, shuffle=True)
+    server_test_dataloader = DataLoader(server_datasets['test'], batch_size=48, shuffle=False)
     updated_graph_encoding = []
 
 
     client_model.eval()
     server_model.eval()
     with torch.no_grad():
+        # for client_i, client_params in enumerate(client_params_list):
+        #     local_val_result = SplitFedNodePredictorClient.client_local_execute(deepcopy(client_state_dict), 'test',
+        #                                                                         **client_params)
+        #     local_val_results.append(local_val_result)
+        #
+        # client_log = aggregate_local_logs([x[0]['log'] for x in local_val_results])
+        # print(client_log)
         for batch in server_test_dataloader:
             x, y, x_attr, y_attr = batch
             x = x.to(device) if (x is not None) else None
@@ -219,16 +227,19 @@ def setup():
                 updated_graph_encoding[client_i:client_i + 1, :, :, :].permute(1, 0, 2, 3)
             )
         })
+    # local_val_results=[]
     for client_i, client_params in enumerate(client_params_list):
 
         local_val_result = SplitFedNodePredictorClient.client_local_execute(deepcopy(client_state_dict),'test', **client_params)
         local_val_results.append(local_val_result)
 
     client_log = aggregate_local_logs([x[0]['log'] for x in local_val_results])
+    print(client_log)
     y_pred=[]
     for x in local_val_results:
         y_pred.append(x[0]['result'])
     y_pred=torch.cat(y_pred,dim=2)
+
     amae=[]
     armse=[]
     amape=[]
@@ -237,7 +248,7 @@ def setup():
     for i in range(12):
 
         metrics=util.metric(y_pred[:,11-i,:,:],real[:,11-i,:,:])
-        log='Evaluation model on test data for horizon{:d}, Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
+        log='horizon{:d}, Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
         print(log.format(i+1,metrics[0],metrics[2],metrics[1]))
         amae.append(metrics[0])
         armse.append(metrics[2])
@@ -245,7 +256,7 @@ def setup():
     log='On average 12 horizon,Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
     print(log.format(np.mean(amae),np.mean(armse),np.mean(amape)))
 
-    print(client_log)
+
 
 
 def aggregate_local_train_results(local_train_results):

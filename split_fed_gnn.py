@@ -92,7 +92,7 @@ class SplitFedNodePredictorClient(nn.Module):
                     )
                     self.optimizer.zero_grad()
                     y_pred = self(data, server_graph_encoding)
-                    loss = util.masked_mae(y_pred,y,0.0)
+                    loss = nn.MSELoss()(y_pred,y)
                     loss.backward()
                     self.optimizer.step()
                     num_samples += x.shape[0]
@@ -133,7 +133,7 @@ class SplitFedNodePredictorClient(nn.Module):
                     x=x, x_attr=x_attr, y=y, y_attr=y_attr
                 )
                 y_pred = self(data, server_graph_encoding)
-                loss = util.masked_mae(y_pred,y,0.0)
+                loss = nn.MSELoss()(y_pred,y)
                 num_samples += x.shape[0]
                 metrics = unscaled_metrics(y_pred, y, self.feature_scaler, 0.0)
                 epoch_log['{}/loss'.format(name)] += loss.detach() * x.shape[0]
@@ -235,10 +235,10 @@ def setup():
     for m in range(50):
         t1=time.time()
         local_train_results = []
-        index = random.sample(range(0, 207), 20)
-        for i in index:
-            adj_mx_ts[[i], :] = 0
-            adj_mx_ts[:, [i]] = 0
+        # index = random.sample(range(0, 207), 20)
+        # for i in index:
+        #     adj_mx_ts[[i], :] = 0
+        #     adj_mx_ts[:, [i]] = 0
         train_edge_index, train_edge_attr = dense_to_sparse(adj_mx_ts)
         for client_i, client_params in enumerate(client_params_list):
 
@@ -262,15 +262,15 @@ def setup():
         client_model.to(device)
         server_model.to(device)
         server_train_dataloader = DataLoader(server_datasets['train'], batch_size=48, shuffle=True)
-        updated_graph_encoding = None
+        server_epoch=1
         global_step = client_params_list[0]['start_global_step']
         with torch.enable_grad():
             client_model.train()
             server_model.train()
             metric = []
-            for epoch_i in range(2):
+            for epoch_i in range(server_epoch+1):
                 updated_graph_encoding = []
-                if epoch_i == 1:
+                if epoch_i == server_epoch:
                     server_train_dataloader = DataLoader(server_datasets['train'], batch_size=48, shuffle=False)
                 for batch in server_train_dataloader:
                     x, y, x_attr, y_attr = batch
@@ -292,19 +292,20 @@ def setup():
                         Data(x=graph_encoding,edge_index=train_edge_index.to('cuda'),
                              edge_attr=train_edge_attr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to('cuda'))
                     )  # N x B x L x F
-                    if epoch_i == 1:
+                    if epoch_i == server_epoch:
                         updated_graph_encoding.append(graph_encoding.detach().clone().cpu())
                     else:
                         y_pred = client_model.forward_decoder(
-                            input, h_encode, return_encoding=False,
+                            input, h_encode,batches_seen=global_step, return_encoding=False,
                             server_graph_encoding=graph_encoding
                         )
-                        loss = util.masked_mae(y_pred,y,0.0)
+                        loss = nn.MSELoss()(y_pred,y)
                         server_optimizer.zero_grad()
                         loss.backward()
                         server_optimizer.step()
                         metrics = unscaled_metrics(y_pred, y, dataset['feature_scaler'], 0.0)
                         metric.append(metrics)
+
         global_step += 1
         t2=time.time()
         # update global step for all clients
@@ -338,11 +339,9 @@ def setup():
 
         log = 'global epoch: {:03d}, MSE: {:.4f}, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}, Training Time: {:.4f}/global epoch'
         print(id, log.format(m, np.mean(mse),np.mean(rmse), np.mean(mae),np.mean(mape),(t2 - t1), flush=True))
-        # torch.save(server_model.state_dict(), "dropnode/" + "server_epoch_" + str(m) + "_" + str(round(np.mean(mae), 4)) + ".pth")
-        # torch.save(client_model.state_dict(),
-        #            "dropnode/" + "client_epoch_" + str(m) + "_" + str(round(np.mean(mae), 4)) + ".pth")
+
         local_val_results = []
-        server_val_dataloader = DataLoader(server_datasets['val'], batch_size=48, shuffle=True)
+        server_val_dataloader = DataLoader(server_datasets['val'], batch_size=48, shuffle=False)
         updated_graph_encoding = []
         client_model.eval()
         server_model.eval()
@@ -385,8 +384,11 @@ def setup():
             local_val_results.append(local_val_result)
 
         client_log = aggregate_local_logs([x[0]['log'] for x in local_val_results])
-        EarlyStopping(client_log['val/loss'],client_model,server_model)
 
+        torch.save(server_model.state_dict(),
+                   "CNFGNN/METR-LA/" + "server_epoch_" + str(m) + "_" + str(client_log['rmse']) + ".pth")
+        torch.save(client_model.state_dict(),
+                   "CNFGNN/METR-LA/" + "client_epoch_" + str(m) + "_" + str(client_log['rmse']) + ".pth")
         print(client_log)
 
     # return {'loss': torch.tensor(0).float(), 'progress_bar': log, 'log': log}

@@ -19,9 +19,10 @@ from tqdm import tqdm
 from st_datasets import load_dataset
 import base_model
 from standalone import unscaled_metrics
-from base_model.GraphNets import GraphNet,GATGraphNet
+from base_model.GraphNets import GraphNet,GATGraphNet,GATGN
 from base_model.GRUSeq2Seq import GRUSeq2Seq,GRUSeq2SeqWithGraphNet
 from torch_geometric.utils import dense_to_sparse
+import pickle
 
 class SplitFedNodePredictorClient(nn.Module):
     def __init__(self, train_dataset, val_dataset, test_dataset, feature_scaler,start_global_step,
@@ -81,7 +82,7 @@ class SplitFedNodePredictorClient(nn.Module):
                 y_pred= self(data, server_graph_encoding)
                 output.append(y_pred)
 
-                loss = util.masked_mae(y_pred,y,0.0)
+                loss = nn.MSELoss()(y_pred,y)
                 num_samples += x.shape[0]
                 metrics = unscaled_metrics(y_pred, y, self.feature_scaler, 0.0)
                 epoch_log['{}/loss'.format(name)] += loss.detach() * x.shape[0]
@@ -122,7 +123,17 @@ class SplitFedNodePredictorClient(nn.Module):
         del client
         res_list.append(res)
         return res_list
-
+def load_pickle(pickle_file):
+    try:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f)
+    except UnicodeDecodeError as e:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f, encoding='latin1')
+    except Exception as e:
+        print('Unable to load data ', pickle_file, ':', e)
+        raise
+    return pickle_data
 def setup():
 
     device='cuda'
@@ -133,6 +144,9 @@ def setup():
     input_size = dataset['train']['x'].shape[-1] + dataset['train']['x_attr'].shape[-1]
     output_size = dataset['train']['y'].shape[-1]
     # print(data['train']['x'].shape)  torch.Size([23974, 12, 207, 1])
+    adj_mx_path = os.path.join('data/', 'sensor_graph', 'adj_mx.pkl')
+    _, _, adj_mx = load_pickle(adj_mx_path)
+    adj_mx_ts = torch.from_numpy(adj_mx).float()
     client_params_list = []
     for client_i in range(num_clients):
         client_datasets = {}
@@ -150,18 +164,29 @@ def setup():
             val_dataset=client_datasets['val'],
             test_dataset=client_datasets['test'],
             feature_scaler=dataset['feature_scaler'],
-
             start_global_step=0
         )
         client_params_list.append(client_params)
 
     client_model = GRUSeq2SeqWithGraphNet()
-    server_model = GATGraphNet(
+    # server_model = GATGraphNet(
+    #     node_input_size=64,
+    #     edge_input_size=1,
+    #     global_input_size=64,
+    #     hidden_size=256,
+    #     updated_node_size=128,
+    #     updated_global_size=128,
+    #     node_output_size=64,
+    #     gn_layer_num=2,
+    #     activation='ReLU', dropout=0
+    # )
+    server_model = GATGN(
         node_input_size=64,
         edge_input_size=1,
         global_input_size=64,
         hidden_size=256,
         updated_node_size=128,
+        updated_edge_size=128,
         updated_global_size=128,
         node_output_size=64,
         gn_layer_num=2,
@@ -173,38 +198,37 @@ def setup():
             data[name]['x'], data[name]['y'],
             data[name]['x_attr'], data[name]['y_attr']
         )
-    local_val_results = []
-    client_state_dict=torch.load(r'GATGN/drop0.5/client_epoch_1_tensor(2.7714, dtype=torch.float64).pth')
-    server_state_dict= torch.load(r'GATGN/drop0.5/server_epoch_1_tensor(2.7714, dtype=torch.float64).pth')
+    client_state_dict=torch.load(r'GATGN/METR_LA/learning/generate_edge/2GN-y/client_epoch_3_tensor(8.8332, dtype=torch.float64).pth')
+    server_state_dict= torch.load(r'GATGN/METR_LA/learning/generate_edge/2GN-y/server_epoch_3_tensor(8.8332, dtype=torch.float64).pth')
     client_model.to(device)
     server_model.to(device)
+    client_model.load_state_dict(client_state_dict)
     server_model.load_state_dict(server_state_dict)
-    server_test_dataloader = DataLoader(server_datasets['test'], batch_size=48, shuffle=True)
-    updated_graph_encoding = []
-
     client_model.eval()
     server_model.eval()
+    server_test_dataloader = DataLoader(server_datasets['test'], batch_size=48, shuffle=False)
     with torch.no_grad():
-        adp = np.ones((207, 207))
+        local_val_results = []
+        updated_graph_encoding = []
+        adp = np.zeros((num_clients,num_clients))
         adp = torch.from_numpy(adp).float()
         test_edge_index, test_edge_attr = dense_to_sparse(adp)
+        # test_edge_index, test_edge_attr = dense_to_sparse(adj_mx_ts)
+
         for batch in server_test_dataloader:
             x, y, x_attr, y_attr = batch
             x = x.to(device) if (x is not None) else None
             y = y.to(device) if (y is not None) else None
             x_attr = x_attr.to(device) if (x_attr is not None) else None
             y_attr = y_attr.to(device) if (y_attr is not None) else None
-
             input = dict(
                 x=x, x_attr=x_attr, y=y, y_attr=y_attr
             )
-
             h_encode = client_model.forward_encoder(input)  # L x (B x N) x F
             batch_num, node_num = input['x'].shape[0], input['x'].shape[2]
             graph_encoding = h_encode.view(h_encode.shape[0], batch_num, node_num, h_encode.shape[2]).permute(2, 1, 0,3)  # N x B x L x F
-
             graph_encoding = server_model(
-                Data(x=graph_encoding,edge_index=test_edge_index.to('cuda'))) # N x B x L x F
+                Data(x=graph_encoding,edge_index=test_edge_index.to('cuda'),edge_attr=test_edge_attr.to('cuda')),0) # N x B x L x F
 
             updated_graph_encoding.append(graph_encoding.detach().clone().cpu())
     updated_graph_encoding = torch.cat(updated_graph_encoding, dim=1)  # N x B x L x F
@@ -225,27 +249,30 @@ def setup():
         local_val_results.append(local_val_result)
 
     client_log = aggregate_local_logs([x[0]['log'] for x in local_val_results])
+    print(client_log)
     y_pred=[]
     for x in local_val_results:
         y_pred.append(x[0]['result'])
     y_pred=torch.cat(y_pred,dim=2)
-    amae=[]
-    armse=[]
-    amape=[]
+    mae=[]
+    rmse=[]
+    mape=[]
     y_pred = dataset['feature_scaler'].inverse_transform(y_pred.detach().cpu())
     real = dataset['feature_scaler'].inverse_transform(data['test']['y'].detach().cpu())
     for i in range(12):
 
-        metrics=util.metric(y_pred[:,11-i,:,:],real[:,11-i,:,:])
-        log='Evaluation model on test data for horizon{:d}, Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
+        metrics=util.metric(y_pred[:,i,:,:],real[:,i,:,:])
+        log='horizon{:d}, Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
         print(log.format(i+1,metrics[0],metrics[2],metrics[1]))
-        amae.append(metrics[0])
-        armse.append(metrics[2])
-        amape.append(metrics[1])
-    log='On average 12 horizon,Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
-    print(log.format(np.mean(amae),np.mean(armse),np.mean(amape)))
 
-    print(client_log)
+        mae.append(metrics[0])
+        rmse.append(metrics[2])
+        mape.append(metrics[1])
+    log='average 12 horizon,Test MAE:{:.4f},Test RMSE:{:.4f},Test MAPE:{:.4f}'
+    print(log.format(np.mean(mae),np.mean(rmse),np.mean(mape)))
+
+
+
 
 
 def aggregate_local_train_results(local_train_results):

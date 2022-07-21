@@ -50,7 +50,6 @@ def unscaled_metrics(y_pred, y, scaler, null_val=np.nan):
     mask /= torch.mean((mask))
     mask = torch.where(torch.isnan(mask), torch.zeros_like(mask), mask)
 
-
     mse = ((y_pred - y) ** 2).mean()
 
     mae = torch.abs(y_pred - y).mean()

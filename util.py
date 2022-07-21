@@ -210,7 +210,7 @@ def masked_mape(preds, labels, null_val=np.nan):
     mask = mask.float()
     mask /=  torch.mean((mask))
     mask = torch.where(torch.isnan(mask), torch.zeros_like(mask), mask)
-    loss = torch.abs(preds-labels)/(torch.abs(labels)+1)
+    loss = torch.abs(preds-labels)/(torch.abs(labels+1))
     loss = loss * mask
     loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
     return torch.mean(loss)
