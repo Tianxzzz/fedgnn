@@ -21,16 +21,21 @@ def generate_partial_graphs(dataname):
     if dataname == 'METR-LA':
         sensor_locations = np.genfromtxt('data/sensor_graph/graph_sensor_locations.csv', delimiter=',',
                                          skip_header=1)
+        print(sensor_locations)
         for t in range(sensor_locations.shape[0]):
             assert int(sensor_locations[t, 1]) == int(adj_mx[0][t])
     else:
         sensor_locations = np.genfromtxt('data/sensor_graph/graph_sensor_locations_bay.csv',
-                                         delimiter=',', skip_header=0)
+                                         delimiter=',', skip_header=1)
+        print(sensor_locations)
         for t in range(sensor_locations.shape[0]):
-            assert int(sensor_locations[t, 0]) == int(adj_mx[0][t])
+            assert int(sensor_locations[t, 2]) == int(adj_mx[0][t])
 
     # sort all sensors via longitude
-    long_sorted_sensors = np.argsort(sensor_locations[:, -1])
+    if dataname == 'METR-LA':
+        long_sorted_sensors = np.argsort(sensor_locations[:, -1])
+    else:
+        long_sorted_sensors = np.argsort(sensor_locations[:, 1])
 
     resdict = {}
     for ratio in [0.05, 0.25, 0.5, 0.75, 0.9, 1.0]:
@@ -38,14 +43,14 @@ def generate_partial_graphs(dataname):
         selected_nodes = sorted(long_sorted_sensors[:num_nodes])
         unselected_nodes = sorted(long_sorted_sensors[num_nodes:])
         print(selected_nodes, unselected_nodes)
-        selected_edges = adj_mx[2][selected_nodes, :][:, selected_nodes]
-
-
-        x, y = sensor_locations[selected_nodes][:, -2], sensor_locations[selected_nodes][:, -1]
+        # selected_edges = adj_mx[2][selected_nodes, :][:, selected_nodes]
+        #
+        #
+        # x, y = sensor_locations[selected_nodes][:, -2], sensor_locations[selected_nodes][:, -1]
 
         if ratio < 1:
             resdict[str(ratio)] = (selected_nodes, unselected_nodes)
     np.savez('data/sensor_graph/{}_partial_nodes.npz'.format(dataname), **resdict)
 
 
-generate_partial_graphs('METR-LA')
+generate_partial_graphs('PEMS-BAY')
